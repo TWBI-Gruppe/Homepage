@@ -1,0 +1,15 @@
+services:
+  rezeptbox:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      APP_PASSWORD: ${APP_PASSWORD:?Bitte APP_PASSWORD in der .env-Datei setzen}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+    volumes:
+      - rezeptbox-data:/data
+
+volumes:
+  rezeptbox-data:

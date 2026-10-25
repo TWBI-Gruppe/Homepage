@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Rezeptbox</title>
+  <meta name="description" content="Rezepte aus Instagram, TikTok & Co. sammeln und automatisch sortieren.">
+  <meta name="theme-color" content="#fbf8f3" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#171412" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Rezeptbox">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div id="main-view" class="main-view" hidden>
+    <header class="topbar">
+      <div class="brand">
+        <img src="/icons/icon.svg" alt="" width="32" height="32">
+        <span>Rezeptbox</span>
+      </div>
+      <div class="topbar-actions">
+        <button class="icon-btn" id="random-btn" type="button" title="Zufallsrezept" aria-label="Zufallsrezept"></button>
+        <button class="icon-btn" id="settings-btn" type="button" title="Einrichten & Teilen" aria-label="Einrichten & Teilen"></button>
+      </div>
+    </header>
+
+    <div class="search">
+      <span class="search-icon" aria-hidden="true"></span>
+      <input id="search" type="search" placeholder="Suchen: Gericht, Zutat, #tag …" autocomplete="off" enterkeyhint="search" aria-label="Rezepte durchsuchen">
+    </div>
+
+    <nav id="chips" class="chips" aria-label="Kategorien"></nav>
+
+    <main>
+      <p id="result-info" class="result-info"></p>
+      <div id="grid" class="grid"></div>
+      <div id="empty" class="empty" hidden></div>
+    </main>
+
+    <button id="add-btn" class="fab" type="button"><span class="fab-icon" aria-hidden="true"></span>Rezept</button>
+  </div>
+
+  <section id="detail" class="detail" hidden aria-live="polite"></section>
+
+  <section id="login-view" class="login" hidden>
+    <form id="login-form" class="login-card">
+      <img src="/icons/icon.svg" alt="" width="72" height="72">
+      <h1>Rezeptbox</h1>
+      <p>Deine gesammelten Rezepte aus Instagram, TikTok &amp; Co.</p>
+      <label class="field">
+        <span>Passwort</span>
+        <input id="login-password" type="password" autocomplete="current-password" required>
+      </label>
+      <p id="login-error" class="form-error" hidden></p>
+      <button class="btn btn-primary btn-block" type="submit">Anmelden</button>
+    </form>
+  </section>
+
+  <dialog id="add-dialog" class="sheet">
+    <form id="add-form" method="dialog">
+      <header class="sheet-head">
+        <h2>Rezept speichern</h2>
+        <button class="icon-btn" type="button" data-close aria-label="Schließen"></button>
+      </header>
+      <div class="field">
+        <label for="add-url">Link zum Beitrag oder Video</label>
+        <div class="input-row">
+          <input id="add-url" type="text" inputmode="url" placeholder="https://www.instagram.com/reel/…" autocomplete="off" required>
+          <button id="paste-btn" class="btn btn-soft" type="button">Einfügen</button>
+        </div>
+      </div>
+      <label class="field">
+        <span>Notiz <small>(optional)</small></span>
+        <textarea id="add-notes" rows="2" placeholder="z. B. „Für Sonntag“ oder „mit Tofu statt Hähnchen“"></textarea>
+      </label>
+      <p id="add-error" class="form-error" hidden></p>
+      <button class="btn btn-primary btn-block" type="submit">Speichern</button>
+      <p class="hint">Schneller geht’s direkt aus Instagram oder TikTok über <strong>Teilen</strong>. <button class="link-btn" type="button" data-open-settings>So richtest du das ein</button></p>
+    </form>
+  </dialog>
+
+  <dialog id="edit-dialog" class="sheet sheet-tall">
+    <form id="edit-form" method="dialog">
+      <header class="sheet-head">
+        <h2>Rezept bearbeiten</h2>
+        <button class="icon-btn" type="button" data-close aria-label="Schließen"></button>
+      </header>
+      <label class="field">
+        <span>Titel</span>
+        <input id="edit-title" type="text" maxlength="200" required>
+      </label>
+      <div class="field">
+        <span class="field-label">Kategorien</span>
+        <div id="edit-categories" class="choice-grid"></div>
+        <div class="input-row">
+          <input id="edit-new-category" type="text" maxlength="40" placeholder="Eigene Kategorie, z. B. Weihnachten" aria-label="Eigene Kategorie">
+          <button id="edit-add-category" class="btn btn-soft" type="button">Hinzufügen</button>
+        </div>
+      </div>
+      <div class="field-row">
+        <label class="field">
+          <span>Zeit (Minuten)</span>
+          <input id="edit-minutes" type="number" min="0" max="10000" inputmode="numeric">
+        </label>
+        <label class="field">
+          <span>Portionen</span>
+          <input id="edit-servings" type="text" maxlength="60" placeholder="z. B. 2 Portionen">
+        </label>
+      </div>
+      <label class="field">
+        <span>Zutaten <small>(eine pro Zeile)</small></span>
+        <textarea id="edit-ingredients" rows="6"></textarea>
+      </label>
+      <label class="field">
+        <span>Zubereitung <small>(ein Schritt pro Zeile)</small></span>
+        <textarea id="edit-steps" rows="6"></textarea>
+      </label>
+      <label class="field">
+        <span>Originaltext aus dem Beitrag</span>
+        <textarea id="edit-caption" rows="4"></textarea>
+      </label>
+      <p id="edit-error" class="form-error" hidden></p>
+      <div class="sheet-actions">
+        <button class="btn btn-ghost" type="button" data-close>Abbrechen</button>
+        <button class="btn btn-primary" type="submit">Speichern</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="settings-dialog" class="sheet sheet-tall">
+    <div id="settings-content"></div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
