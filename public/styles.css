@@ -1134,6 +1134,10 @@ dialog.sheet > div {
   font-size: 17px;
 }
 
+.setup * + h3 {
+  margin-top: 18px;
+}
+
 .setup p {
   margin: 0 0 8px;
   font-size: 14.5px;

@@ -707,6 +707,8 @@ async function openSettings() {
         <li>In Instagram/TikTok: <strong>Teilen</strong> → „Teilen über …“ bzw. „Mehr“ → <strong>In Rezeptbox speichern</strong>.</li>
       </ol>
       <p class="muted">Zusätzlich praktisch: In Safari über <strong>Teilen → „Zum Home-Bildschirm“</strong> die Rezeptbox als App aufs iPhone legen.</p>
+      <h3>Weiteres iPhone, z. B. in der Familie</h3>
+      <p class="muted">Den Kurzbefehl musst du nur einmal bauen: In der Kurzbefehle-App lange darauf drücken → <strong>Teilen</strong> → <strong>„iCloud-Link kopieren“</strong> und den Link per Nachricht schicken. Auf dem anderen iPhone den Link öffnen → <strong>„Kurzbefehl hinzufügen“</strong> – fertig. Beide speichern dann in dieselbe Sammlung. Der Link enthält euren Schlüssel, also nur an Menschen schicken, die mitsammeln sollen.</p>
     </section>`;
 
   const fallback = `

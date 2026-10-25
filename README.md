@@ -20,7 +20,7 @@ Die Rezeptbox ist eine Web-App (PWA): Sie läuft im Browser, lässt sich aber wi
 | Gerät | So geht’s |
 |---|---|
 | **Android** | Rezeptbox in Chrome öffnen → Menü ⋮ → *App installieren*. Danach in Instagram/TikTok auf **Teilen** → **Rezeptbox**. |
-| **iPhone / iPad** | Einmalig einen Kurzbefehl anlegen, der den geteilten Link an die Rezeptbox schickt. Die Schritt-für-Schritt-Anleitung mit deiner persönlichen Adresse und deinem Schlüssel steht in der App unter **Einstellungen** (Schieberegler-Symbol oben rechts). Danach: Teilen → *Teilen über …* / *Mehr* → **In Rezeptbox speichern**. |
+| **iPhone / iPad** | Einmalig einen Kurzbefehl anlegen, der den geteilten Link an die Rezeptbox schickt. Die Schritt-für-Schritt-Anleitung mit deiner persönlichen Adresse und deinem Schlüssel steht in der App unter **Einstellungen** (Schieberegler-Symbol oben rechts). Danach: Teilen → *Teilen über …* / *Mehr* → **In Rezeptbox speichern**. Weitere iPhones (z. B. in der Familie) bekommen den fertigen Kurzbefehl per iCloud-Link. |
 | **Überall** | In Instagram/TikTok *Link kopieren*, in der Rezeptbox auf **+ Rezept** → **Einfügen**. |
 
 Falls Instagram einmal keine Details herausgibt (das passiert gelegentlich, weil Instagram Beiträge hinter einem Login versteckt), zeigt die App ein Feld an, in das du die Bildunterschrift einfügen kannst. Daraus wird dann das Rezept erstellt.
@@ -31,7 +31,20 @@ Die App braucht einen kleinen Server, der dauerhaft läuft, damit du von jedem G
 
 > **Wichtig:** Damit sich die App installieren lässt und das Teilen funktioniert, muss sie über **HTTPS** erreichbar sein (z. B. `https://rezepte.deine-domain.de`).
 
-### Mit Docker (empfohlen)
+### Am einfachsten: Railway (ohne eigenen Server, geht auch vom iPhone aus)
+
+[Railway](https://railway.com) baut die App direkt aus diesem GitHub-Repository und stellt eine HTTPS-Adresse bereit. Der Hobby-Tarif kostet 5 US-$ im Monat, 5 $ Nutzung sind darin enthalten – für eine private Rezeptsammlung reicht das normalerweise (Stand Oktober 2026, aktuelle Preise auf der Railway-Website prüfen).
+
+1. Auf railway.com mit dem GitHub-Konto anmelden und den Hobby-Tarif wählen.
+2. **New Project → Deploy from GitHub repo** → dieses Repository auswählen (Railway dabei den Zugriff auf die GitHub-Organisation erlauben). Falls nötig unter *Settings → Source* den Branch mit der Rezeptbox einstellen.
+3. Unter **Variables** `APP_PASSWORD` mit eurem gemeinsamen Passwort anlegen, optional `ANTHROPIC_API_KEY`.
+4. Ein **Volume** hinzufügen und an den Service hängen, **Mount Path `/data`**. Ohne Volume sind die Rezepte nach dem nächsten Update weg.
+5. *Settings → Networking → **Generate Domain*** (falls nach einem Port gefragt wird, den vorgeschlagenen übernehmen). Ergebnis ist eine Adresse wie `https://rezeptbox-production.up.railway.app`.
+6. Die Adresse in Safari öffnen, anmelden, über **Teilen → „Zum Home-Bildschirm“** als App ablegen. Danach in der App unter **Einstellungen** den Kurzbefehl einrichten und per iCloud-Link an weitere iPhones schicken.
+
+Neue Versionen im Branch baut Railway automatisch.
+
+### Mit Docker auf eigenem Server oder NAS
 
 ```bash
 cp .env.example .env        # APP_PASSWORD setzen, optional ANTHROPIC_API_KEY
@@ -46,7 +59,7 @@ rezepte.deine-domain.de {
 }
 ```
 
-Das funktioniert auf einem eigenen Server, einem VPS oder einem NAS mit Docker-Unterstützung (z. B. Synology). Alternativ lässt sich das Docker-Image bei Anbietern wie Railway, Fly.io oder Render betreiben; dort muss ein **persistenter Speicher (Volume) unter `/data`** eingehängt werden, sonst gehen die Rezepte beim nächsten Neustart verloren.
+Das funktioniert auf einem eigenen Server, einem VPS oder einem NAS mit Docker-Unterstützung (z. B. Synology). Bei anderen Docker-Anbietern gilt wie bei Railway: Ein **persistenter Speicher unter `/data`** ist Pflicht, sonst gehen die Rezepte beim nächsten Neustart verloren.
 
 ### Ohne Docker
 
