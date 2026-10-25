@@ -1,7 +1,4 @@
-import { lookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
-import { writeFile } from 'node:fs/promises';
-import path from 'node:path';
+import { Buffer } from 'node:buffer';
 import {
   decodeEntities,
   detectPlatform,
@@ -17,12 +14,15 @@ const BROWSER_UA =
 // Instagram only serves preview tags (caption, image) to link-preview crawlers.
 const PREVIEW_UA = 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)';
 
-const MAX_HTML_BYTES = 3 * 1024 * 1024;
+const MAX_HTML_BYTES = 2 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const IMAGE_TYPES = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
 
+const isIPv4 = (host) => /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
+const isIPv6 = (host) => host.includes(':');
+
 function isPrivateAddress(address) {
-  if (isIP(address) === 6) {
+  if (isIPv6(address)) {
     const a = address.toLowerCase();
     if (a.startsWith('::ffff:')) return isPrivateAddress(a.slice(7));
     return a === '::1' || a === '::' || a.startsWith('fc') || a.startsWith('fd') || a.startsWith('fe80');
@@ -37,15 +37,17 @@ function isPrivateAddress(address) {
 
 // The server fetches URLs that users send it, so keep it away from the
 // local network unless explicitly allowed (tests, self-hosted setups).
-async function assertPublicUrl(url, allowPrivate) {
+// `resolveHost` (hostname → IP list) is passed in on Node; Cloudflare Workers
+// cannot reach private networks anyway.
+async function assertPublicUrl(url, allowPrivate, resolveHost) {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('Nur http(s)-Links werden unterstützt');
   if (allowPrivate) return;
   const host = url.hostname.replace(/^\[|\]$/g, '');
   if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.internal')) {
     throw new Error('Lokale Adressen sind nicht erlaubt');
   }
-  const addresses = isIP(host) ? [{ address: host }] : await lookup(host, { all: true });
-  if (addresses.some(({ address }) => isPrivateAddress(address))) throw new Error('Lokale Adressen sind nicht erlaubt');
+  const addresses = isIPv4(host) || isIPv6(host) ? [host] : resolveHost ? await resolveHost(host) : [];
+  if (addresses.some(isPrivateAddress)) throw new Error('Lokale Adressen sind nicht erlaubt');
 }
 
 async function readLimited(res, maxBytes) {
@@ -67,11 +69,14 @@ async function readLimited(res, maxBytes) {
 }
 
 // fetch() with redirect checks, a timeout and a size cap.
-export async function safeFetch(rawUrl, { allowPrivate = false, timeoutMs = 12000, headers = {}, maxRedirects = 6 } = {}) {
+export async function safeFetch(
+  rawUrl,
+  { allowPrivate = false, resolveHost = null, timeoutMs = 12000, headers = {}, maxRedirects = 6 } = {},
+) {
   let url = new URL(rawUrl);
   const signal = AbortSignal.timeout(timeoutMs);
   for (let i = 0; i <= maxRedirects; i++) {
-    await assertPublicUrl(url, allowPrivate);
+    await assertPublicUrl(url, allowPrivate, resolveHost);
     const res = await fetch(url, {
       redirect: 'manual',
       signal,
@@ -267,7 +272,7 @@ export async function fetchMetadata(rawUrl, options = {}) {
 }
 
 // Social-media CDN image links expire, so thumbnails are stored locally.
-export async function downloadImage(imageUrl, dir, baseName, options = {}) {
+export async function downloadImage(imageUrl, options = {}) {
   const { res } = await safeFetch(imageUrl, { ...options, headers: { accept: 'image/*' } });
   if (!res.ok) {
     await res.body?.cancel();
@@ -279,8 +284,5 @@ export async function downloadImage(imageUrl, dir, baseName, options = {}) {
     await res.body?.cancel();
     throw new Error(`Kein unterstütztes Bildformat (${mediaType || 'unbekannt'})`);
   }
-  const data = await readLimited(res, MAX_IMAGE_BYTES);
-  const file = `${baseName}.${ext}`;
-  await writeFile(path.join(dir, file), data);
-  return { file, mediaType, data };
+  return { ext, mediaType, data: await readLimited(res, MAX_IMAGE_BYTES) };
 }

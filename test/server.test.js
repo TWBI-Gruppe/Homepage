@@ -1,12 +1,11 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createApp } from '../server/app.js';
-import { openDatabase } from '../server/db.js';
-import { createEnricher } from '../server/enrich.js';
+import { createNodeServer } from '../server/node.js';
+import { sqliteDriver } from '../server/sqlite.js';
 
 // 1×1 transparent PNG
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
@@ -53,24 +52,18 @@ const fakeAi = {
 
 const silent = { warn() {}, error() {} };
 
-// A complete app instance with its own temporary data directory.
+// A complete app instance with its own temporary database.
 async function startApp({ ai = null } = {}) {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'rezeptbox-test-'));
-  const imagesDir = path.join(dataDir, 'images');
-  mkdirSync(imagesDir);
-  const db = openDatabase(path.join(dataDir, 'test.db'));
-  const fetchOptions = { allowPrivate: true };
-  const enricher = createEnricher({ db, imagesDir, ai, fetchOptions, log: silent });
-  const server = createServer(createApp({ db, enricher, imagesDir, password: 'geheim', ai, fetchOptions, log: silent }));
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const dbFile = path.join(dataDir, 'test.db');
+  const app = await createNodeServer({ dbFile, password: 'geheim', ai, fetchOptions: { allowPrivate: true }, log: silent });
+  await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve));
   return {
-    base: `http://127.0.0.1:${server.address().port}`,
-    dataDir,
-    enricher,
+    base: `http://127.0.0.1:${app.server.address().port}`,
+    dbFile,
+    queue: app.queue,
     async close() {
-      await app.enricher.idle();
-      await new Promise((resolve) => server.close(resolve));
-      db.close();
+      await app.close();
       rmSync(dataDir, { recursive: true, force: true });
     },
   };
@@ -102,9 +95,10 @@ async function call(pathname, { method = 'GET', body, headers = {}, auth = true 
 
 before(async () => {
   fixture = createServer((req, res) => {
-    if (req.url === '/rezept') return res.writeHead(200, { 'content-type': 'text/html' }).end(RECIPE_PAGE);
-    if (req.url === '/caption') return res.writeHead(200, { 'content-type': 'text/html' }).end(CAPTION_PAGE);
-    if (req.url === '/bild.png') return res.writeHead(200, { 'content-type': 'image/png' }).end(PNG);
+    const { pathname } = new URL(req.url, 'http://fixture');
+    if (pathname === '/rezept') return res.writeHead(200, { 'content-type': 'text/html' }).end(RECIPE_PAGE);
+    if (pathname === '/caption') return res.writeHead(200, { 'content-type': 'text/html' }).end(CAPTION_PAGE);
+    if (pathname === '/bild.png') return res.writeHead(200, { 'content-type': 'image/png' }).end(PNG);
     res.writeHead(404).end();
   });
   await new Promise((resolve) => fixture.listen(0, '127.0.0.1', resolve));
@@ -141,7 +135,7 @@ test('saving a recipe page fills in details from JSON-LD', async () => {
   assert.equal(created.data.recipe.status, 'pending');
   assert.equal(created.data.recipe.url, `${fixtureUrl}/rezept`);
 
-  await app.enricher.idle();
+  await app.queue.idle();
   const { data } = await call(`/api/recipes/${created.data.recipe.id}`);
   const recipe = data.recipe;
   assert.equal(recipe.status, 'done');
@@ -168,7 +162,7 @@ test('the same link is only stored once', async () => {
 
 test('captions from preview tags are parsed and categorised without AI', async () => {
   const created = await call('/api/recipes', { method: 'POST', body: { url: `${fixtureUrl}/caption` } });
-  await app.enricher.idle();
+  await app.queue.idle();
   const { recipe } = (await call(`/api/recipes/${created.data.recipe.id}`)).data;
   assert.equal(recipe.title, 'Kürbissuppe in 30 Minuten 🎃');
   assert.deepEqual(recipe.ingredients, ['1 Hokkaido', '400 ml Kokosmilch']);
@@ -196,7 +190,7 @@ test('the API token from /api/setup works for iOS Shortcuts', async () => {
     body: JSON.stringify({ url: `${fixtureUrl}/rezept?variante=3` }),
   });
   assert.equal(wrong.status, 401);
-  await app.enricher.idle();
+  await app.queue.idle();
 });
 
 test('PATCH updates allowed fields and validates input', async () => {
@@ -242,7 +236,7 @@ test('with AI configured, recipes are analysed by it and refresh keeps custom ca
 
     const created = await (await fetch(`${aiApp.base}/api/recipes`, json('POST', { url: `${fixtureUrl}/rezept` }))).json();
     const id = created.recipe.id;
-    await aiApp.enricher.idle();
+    await aiApp.queue.idle();
     const get = async () => (await (await fetch(`${aiApp.base}/api/recipes/${id}`, { headers: { cookie: aiCookie } })).json()).recipe;
 
     let recipe = await get();
@@ -258,7 +252,7 @@ test('with AI configured, recipes are analysed by it and refresh keeps custom ca
     await fetch(`${aiApp.base}/api/recipes/${id}`, json('PATCH', { categories: ['Weihnachten', 'pasta'], title: 'Mein Titel' }));
     const refreshed = await fetch(`${aiApp.base}/api/recipes/${id}/refresh`, json('POST', {}));
     assert.equal(refreshed.status, 202);
-    await aiApp.enricher.idle();
+    await aiApp.queue.idle();
     recipe = await get();
     assert.equal(recipe.status, 'done');
     assert.equal(recipe.title, 'KI-Titel');
@@ -278,7 +272,7 @@ test('a failed AI call falls back to keyword categories and is reported', async 
       headers: { cookie: aiCookie, 'content-type': 'application/json' },
       body: JSON.stringify({ url: `${fixtureUrl}/caption` }),
     })).json();
-    await aiApp.enricher.idle();
+    await aiApp.queue.idle();
     const { recipe } = await (await fetch(`${aiApp.base}/api/recipes/${created.recipe.id}`, { headers: { cookie: aiCookie } })).json();
     assert.equal(recipe.status, 'done');
     assert.ok(recipe.categories.includes('suppen'));
@@ -291,7 +285,7 @@ test('a failed AI call falls back to keyword categories and is reported', async 
 
 test('links that cannot be loaded are kept and can be completed with a pasted caption', async () => {
   const created = await call('/api/recipes', { method: 'POST', body: { url: `${fixtureUrl}/gibt-es-nicht` } });
-  await app.enricher.idle();
+  await app.queue.idle();
   let { recipe } = (await call(`/api/recipes/${created.data.recipe.id}`)).data;
   assert.equal(recipe.status, 'failed');
   assert.match(recipe.statusDetail, /HTTP 404/);
@@ -302,7 +296,7 @@ test('links that cannot be loaded are kept and can be completed with a pasted ca
     body: { caption: 'Overnight Oats mit Beeren\nZutaten:\n50 g Haferflocken\n100 ml Milch' },
   });
   await call(`/api/recipes/${recipe.id}/refresh`, { method: 'POST', body: {} });
-  await app.enricher.idle();
+  await app.queue.idle();
   ({ recipe } = (await call(`/api/recipes/${recipe.id}`)).data);
   assert.equal(recipe.status, 'done');
   assert.equal(recipe.title, 'Overnight Oats mit Beeren');
@@ -314,11 +308,32 @@ test('links that cannot be loaded are kept and can be completed with a pasted ca
 test('DELETE removes the recipe and its image', async () => {
   const { recipes } = (await call('/api/recipes')).data;
   const target = recipes.find((r) => r.thumbnail);
-  const file = path.join(app.dataDir, 'images', path.basename(target.thumbnail));
-  assert.ok(existsSync(file));
+  assert.equal((await fetch(base + target.thumbnail, { headers: { cookie } })).status, 200);
   assert.equal((await call(`/api/recipes/${target.id}`, { method: 'DELETE' })).status, 200);
   assert.equal((await call(`/api/recipes/${target.id}`)).status, 404);
-  assert.ok(!existsSync(file));
+  assert.equal((await fetch(base + target.thumbnail, { headers: { cookie } })).status, 404);
+});
+
+test('analyses that were cut off are restarted, and given up after three tries', async () => {
+  const sql = sqliteDriver(app.dbFile);
+  const old = '2020-01-01T00:00:00.000Z';
+  const insert = (url, attempts) => sql.run(
+    "INSERT INTO recipes (url, platform, title, status, attempts, created_at, updated_at) VALUES (?, 'web', 'Rezept', 'pending', ?, ?, ?)",
+    url, attempts, old, old,
+  );
+  const retry = (await insert(`${fixtureUrl}/caption?stuck=1`, 1)).lastRowId;
+  const giveUp = (await insert(`${fixtureUrl}/caption?stuck=2`, 3)).lastRowId;
+  sql.close();
+
+  const { recipes } = (await call('/api/recipes')).data;
+  assert.equal(recipes.find((r) => r.id === giveUp).status, 'failed');
+  assert.match(recipes.find((r) => r.id === giveUp).statusDetail, /zu lange/);
+  await app.queue.idle();
+  const { recipe } = (await call(`/api/recipes/${retry}`)).data;
+  assert.equal(recipe.status, 'done');
+  assert.equal(recipe.title, 'Kürbissuppe in 30 Minuten 🎃');
+  await call(`/api/recipes/${retry}`, { method: 'DELETE' });
+  await call(`/api/recipes/${giveUp}`, { method: 'DELETE' });
 });
 
 test('export contains all recipes', async () => {

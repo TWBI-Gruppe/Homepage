@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import Anthropic from '@anthropic-ai/sdk';
 import { CATEGORIES, CATEGORY_IDS } from './categories.js';
 
@@ -48,33 +49,39 @@ function buildPrompt({ platform, url, title, author, caption, ingredients, steps
   return `Verfügbare Kategorien:\n${CATEGORY_LIST}\n\n<beitrag>\n${parts.join('\n\n')}\n</beitrag>`;
 }
 
-// Returns null when no API credentials are configured; the app then falls
-// back to keyword-based categorisation.
-export function createAi({ apiKey = process.env.ANTHROPIC_API_KEY, model = process.env.ANTHROPIC_MODEL || DEFAULT_MODEL } = {}) {
+// Returns null when no API key is configured; the app then falls back to
+// keyword-based categorisation.
+export function createAi({ apiKey, model } = {}) {
   if (!apiKey) return null;
   const client = new Anthropic({ apiKey });
+  model ||= DEFAULT_MODEL;
 
   return {
     model,
-    async analyze(input) {
+    // `timeoutMs` bounds the whole call including retries (Cloudflare only
+    // keeps background work alive for a limited time).
+    async analyze(input, { timeoutMs } = {}) {
       const content = [];
       if (input.image) {
         content.push({
           type: 'image',
-          source: { type: 'base64', media_type: input.image.mediaType, data: input.image.data.toString('base64') },
+          source: { type: 'base64', media_type: input.image.mediaType, data: Buffer.from(input.image.data).toString('base64') },
         });
       }
       content.push({ type: 'text', text: buildPrompt(input) });
 
-      const response = await client.beta.messages.create({
-        model,
-        max_tokens: 16000,
-        betas: ['server-side-fallback-2026-07-01'],
-        fallbacks: 'default',
-        output_config: { effort: 'low', format: { type: 'json_schema', schema: SCHEMA } },
-        system: SYSTEM,
-        messages: [{ role: 'user', content }],
-      });
+      const response = await client.beta.messages.create(
+        {
+          model,
+          max_tokens: 16000,
+          betas: ['server-side-fallback-2026-07-01'],
+          fallbacks: 'default',
+          output_config: { effort: 'low', format: { type: 'json_schema', schema: SCHEMA } },
+          system: SYSTEM,
+          messages: [{ role: 'user', content }],
+        },
+        timeoutMs ? { signal: AbortSignal.timeout(timeoutMs), maxRetries: 0 } : undefined,
+      );
 
       if (response.stop_reason === 'refusal') throw new Error('Die KI hat die Analyse abgelehnt');
       if (response.stop_reason === 'max_tokens') throw new Error('Die KI-Antwort war unvollständig');
@@ -102,6 +109,9 @@ export function describeAiError(error) {
   if (error instanceof Anthropic.NotFoundError) return 'KI: Modell nicht gefunden';
   if (error instanceof Anthropic.RateLimitError) return 'KI: Limit erreicht, später erneut analysieren';
   if (error instanceof Anthropic.BadRequestError) return `KI: ungültige Anfrage (${error.message})`;
+  if (error instanceof Anthropic.APIUserAbortError || error?.name === 'TimeoutError') {
+    return 'KI hat zu lange gebraucht – „Neu analysieren“ versuchen';
+  }
   if (error instanceof Anthropic.APIConnectionError) return 'KI: keine Verbindung';
   if (error instanceof Anthropic.APIError) return `KI-Fehler ${error.status ?? ''}`.trim();
   return `KI: ${error.message}`;

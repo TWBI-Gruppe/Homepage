@@ -102,6 +102,9 @@ function parseAttributes(tag) {
 // og:*, twitter:* and plain <meta name=…> values, keyed by lower-cased name.
 export function parseMeta(html = '') {
   const meta = {};
+  // Preview tags live in <head>; skipping the (often huge) body saves CPU time.
+  const headEnd = html.search(/<\/head\s*>/i);
+  if (headEnd > 0) html = html.slice(0, headEnd);
   for (const m of html.matchAll(/<meta\b[^>]*>/gi)) {
     const attrs = parseAttributes(m[0]);
     const key = (attrs.property || attrs.name || attrs.itemprop || '').toLowerCase();

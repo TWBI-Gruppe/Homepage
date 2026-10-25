@@ -1,31 +1,21 @@
-import { createReadStream } from 'node:fs';
-import { stat, unlink } from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { createAuth } from './auth.js';
 import { CATEGORIES } from './categories.js';
 import { placeholderTitle } from './enrich.js';
 import { resolveShortLink } from './fetcher.js';
 import { detectPlatform, findUrl, normalizeUrl } from './parse.js';
 
-const PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../public');
+// The API as a Fetch-style handler (Request in, Response out), so the same
+// code runs on Node and on Cloudflare Workers. Static files are served by the
+// platform: server/node.js on Node, the assets setting in wrangler.jsonc on
+// Cloudflare.
+
 const MAX_BODY = 1024 * 1024;
+// A run that has not reported back for this long was cut off (e.g. by the
+// Cloudflare time limit) and gets restarted, at most MAX_ATTEMPTS times.
+const STALE_AFTER_MS = 2 * 60_000;
+const MAX_ATTEMPTS = 3;
 
-const MIME = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.webmanifest': 'application/manifest+json',
-  '.json': 'application/json',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.webp': 'image/webp',
-  '.gif': 'image/gif',
-  '.ico': 'image/x-icon',
-};
-
-const SECURITY_HEADERS = {
+export const SECURITY_HEADERS = {
   'x-content-type-options': 'nosniff',
   'x-frame-options': 'DENY',
   'referrer-policy': 'no-referrer',
@@ -40,30 +30,26 @@ class HttpError extends Error {
   }
 }
 
-function send(res, status, body, headers = {}) {
-  const isJson = typeof body !== 'string' && !Buffer.isBuffer(body);
-  const payload = isJson ? JSON.stringify(body) : body;
-  res.writeHead(status, {
-    ...SECURITY_HEADERS,
-    'content-type': isJson ? 'application/json; charset=utf-8' : 'text/plain; charset=utf-8',
-    'cache-control': 'no-store',
-    ...headers,
+function send(status, body, headers = {}) {
+  const isJson = typeof body !== 'string';
+  return new Response(isJson ? JSON.stringify(body) : body, {
+    status,
+    headers: {
+      ...SECURITY_HEADERS,
+      'content-type': isJson ? 'application/json; charset=utf-8' : 'text/plain; charset=utf-8',
+      'cache-control': 'no-store',
+      ...headers,
+    },
   });
-  res.end(payload);
 }
 
-async function readJson(req) {
-  if (!(req.headers['content-type'] || '').includes('application/json')) {
+async function readJson(request) {
+  if (!(request.headers.get('content-type') || '').includes('application/json')) {
     throw new HttpError(415, 'Erwarte JSON (Content-Type: application/json)');
   }
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > MAX_BODY) throw new HttpError(413, 'Anfrage ist zu groß');
-    chunks.push(chunk);
-  }
-  const text = Buffer.concat(chunks).toString('utf8').trim();
+  if (Number(request.headers.get('content-length')) > MAX_BODY) throw new HttpError(413, 'Anfrage ist zu groß');
+  const text = (await request.text()).trim();
+  if (text.length > MAX_BODY) throw new HttpError(413, 'Anfrage ist zu groß');
   if (!text) return {};
   try {
     const data = JSON.parse(text);
@@ -110,37 +96,27 @@ function validatePatch(body) {
   return out;
 }
 
-function requestIsHttps(req) {
-  return Boolean(req.socket.encrypted) || (req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
+function requestIsHttps(request) {
+  const forwarded = (request.headers.get('x-forwarded-proto') || '').split(',')[0].trim();
+  return forwarded ? forwarded === 'https' : new URL(request.url).protocol === 'https:';
 }
 
-function origin(req) {
-  const host = req.headers['x-forwarded-host'] || req.headers.host;
-  return `${requestIsHttps(req) ? 'https' : 'http'}://${host}`;
+function origin(request) {
+  const url = new URL(request.url);
+  const host = request.headers.get('x-forwarded-host') || url.host;
+  return `${requestIsHttps(request) ? 'https' : 'http'}://${host}`;
 }
 
-async function serveFile(res, file, cacheControl) {
-  let info;
-  try {
-    info = await stat(file);
-  } catch {
-    return false;
-  }
-  if (!info.isFile()) return false;
-  res.writeHead(200, {
-    ...SECURITY_HEADERS,
-    'content-type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
-    'content-length': info.size,
-    'cache-control': cacheControl,
-  });
-  createReadStream(file).pipe(res);
-  return true;
-}
-
-export function createApp({ db, enricher, imagesDir, password, secret, ai = null, fetchOptions = {}, log = console }) {
+/**
+ * @param {object} options
+ * @param {object} options.store     see store.js
+ * @param {(id: number, opts: {force?: boolean}, ctx: object) => void} options.enqueue
+ *        starts the background analysis of a recipe
+ */
+export function createApp({ store, enqueue, password, secret, ai = null, fetchOptions = {}, log = console }) {
   const auth = createAuth(password, secret);
 
-  async function addRecipe(body) {
+  async function addRecipe(body, ctx) {
     const found = findUrl(body.url, body.text, body.title);
     if (!found) throw new HttpError(400, 'Kein Link gefunden. Bitte einen Link von Instagram, TikTok o. Ä. teilen.');
     let url;
@@ -155,83 +131,100 @@ export function createApp({ db, enricher, imagesDir, password, secret, ai = null
       log.warn?.(`Kurzlink ${url} nicht aufgelöst: ${error.message}`);
     }
 
-    const existing = db.findByUrl(url);
+    const existing = await store.findByUrl(url);
     if (existing) return { recipe: existing, duplicate: true };
 
     const platform = detectPlatform(url);
-    const recipe = db.insert({
+    const recipe = await store.insert({
       url,
       platform,
       title: placeholderTitle(platform),
       notes: cleanString(body.notes, 20000) ?? '',
       status: 'pending',
     });
-    enricher.enqueue(recipe.id);
+    enqueue(recipe.id, {}, ctx);
     return { recipe, duplicate: false };
   }
 
-  function recipeOr404(idParam) {
-    const recipe = db.get(Number(idParam));
+  // Restarts analyses that were cut off, or gives up on them.
+  async function recoverStuck(recipes, ctx) {
+    const now = Date.now();
+    for (const recipe of recipes) {
+      if (recipe.status !== 'pending' || now - Date.parse(recipe.updatedAt) < STALE_AFTER_MS) continue;
+      if (recipe.attempts >= MAX_ATTEMPTS) {
+        Object.assign(recipe, await store.update(recipe.id, {
+          status: 'failed',
+          statusDetail: 'Die Analyse hat zu lange gedauert – „Neu analysieren“ versuchen',
+        }));
+      } else {
+        Object.assign(recipe, await store.update(recipe.id, { status: 'pending' }));
+        enqueue(recipe.id, {}, ctx);
+      }
+    }
+  }
+
+  async function recipeOr404(idParam) {
+    const recipe = await store.get(Number(idParam));
     if (!recipe) throw new HttpError(404, 'Rezept nicht gefunden');
     return recipe;
   }
 
-  async function handleApi(req, res, pathname) {
-    const method = req.method;
+  async function handleApi(request, pathname, ctx) {
+    const method = request.method;
 
     if (pathname === '/api/session' && method === 'GET') {
-      return send(res, 200, { authRequired: auth.enabled, authenticated: auth.isAuthorized(req), ai: Boolean(ai) });
+      return send(200, { authRequired: auth.enabled, authenticated: auth.isAuthorized(request.headers), ai: Boolean(ai) });
     }
     if (pathname === '/api/login' && method === 'POST') {
-      const body = await readJson(req);
-      const result = auth.checkPassword(String(body.password ?? ''), req.socket.remoteAddress);
+      const body = await readJson(request);
+      const result = auth.checkPassword(String(body.password ?? ''), ctx.clientIp || 'unknown');
       if (result.locked) throw new HttpError(429, 'Zu viele Versuche. Bitte in 15 Minuten erneut probieren.');
       if (!result.ok) throw new HttpError(401, 'Falsches Passwort');
-      return send(res, 200, { ok: true }, { 'set-cookie': auth.sessionCookie(requestIsHttps(req)) });
+      return send(200, { ok: true }, { 'set-cookie': auth.sessionCookie(requestIsHttps(request)) });
     }
     if (pathname === '/api/logout' && method === 'POST') {
-      return send(res, 200, { ok: true }, { 'set-cookie': auth.clearCookie() });
+      return send(200, { ok: true }, { 'set-cookie': auth.clearCookie() });
     }
 
-    if (!auth.isAuthorized(req)) throw new HttpError(401, 'Bitte anmelden');
+    if (!auth.isAuthorized(request.headers)) throw new HttpError(401, 'Bitte anmelden');
 
     if (pathname === '/api/recipes' && method === 'GET') {
-      return send(res, 200, { recipes: db.list(), categories: CATEGORIES.map(({ id, label, emoji }) => ({ id, label, emoji })) });
+      const recipes = await store.list();
+      await recoverStuck(recipes, ctx);
+      return send(200, { recipes, categories: CATEGORIES.map(({ id, label, emoji }) => ({ id, label, emoji })) });
     }
     if (pathname === '/api/recipes' && method === 'POST') {
-      const result = await addRecipe(await readJson(req));
-      return send(res, result.duplicate ? 200 : 201, result);
+      const result = await addRecipe(await readJson(request), ctx);
+      return send(result.duplicate ? 200 : 201, result);
     }
     if (pathname === '/api/setup' && method === 'GET') {
-      return send(res, 200, { apiToken: auth.enabled ? auth.apiToken : null, endpoint: `${origin(req)}/api/recipes` });
+      return send(200, { apiToken: auth.enabled ? auth.apiToken : null, endpoint: `${origin(request)}/api/recipes` });
     }
     if (pathname === '/api/export' && method === 'GET') {
       const date = new Date().toISOString().slice(0, 10);
-      return send(res, 200, { exportedAt: new Date().toISOString(), recipes: db.list() }, {
+      return send(200, { exportedAt: new Date().toISOString(), recipes: await store.list() }, {
         'content-disposition': `attachment; filename="rezeptbox-${date}.json"`,
       });
     }
 
     const match = pathname.match(/^\/api\/recipes\/(\d+)(\/refresh)?$/);
     if (match) {
-      const recipe = recipeOr404(match[1]);
+      const recipe = await recipeOr404(match[1]);
       if (match[2] && method === 'POST') {
-        await readJson(req);
-        db.update(recipe.id, { status: 'pending', statusDetail: null });
-        enricher.enqueue(recipe.id, { force: true });
-        return send(res, 202, { recipe: db.get(recipe.id) });
+        await readJson(request);
+        const pending = await store.update(recipe.id, { status: 'pending', statusDetail: null, attempts: 0 });
+        enqueue(recipe.id, { force: true }, ctx);
+        return send(202, { recipe: pending });
       }
       if (match[2]) throw new HttpError(405, 'Methode nicht erlaubt');
-      if (method === 'GET') return send(res, 200, { recipe });
+      if (method === 'GET') return send(200, { recipe });
       if (method === 'PATCH') {
-        const changes = validatePatch(await readJson(req));
-        return send(res, 200, { recipe: db.update(recipe.id, changes) });
+        const changes = validatePatch(await readJson(request));
+        return send(200, { recipe: await store.update(recipe.id, changes) });
       }
       if (method === 'DELETE') {
-        const file = db.thumbnailFile(recipe.id);
-        db.remove(recipe.id);
-        if (file) await unlink(path.join(imagesDir, file)).catch(() => {});
-        return send(res, 200, { ok: true });
+        await store.remove(recipe.id);
+        return send(200, { ok: true });
       }
       throw new HttpError(405, 'Methode nicht erlaubt');
     }
@@ -239,43 +232,42 @@ export function createApp({ db, enricher, imagesDir, password, secret, ai = null
     throw new HttpError(404, 'Unbekannte Adresse');
   }
 
-  async function handleStatic(req, res, pathname) {
-    if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Methode nicht erlaubt');
-
-    if (pathname.startsWith('/images/')) {
-      if (!auth.isAuthorized(req)) throw new HttpError(401, 'Bitte anmelden');
-      const name = path.basename(pathname);
-      if (!/^[\w.-]+$/.test(name) || !(await serveFile(res, path.join(imagesDir, name), 'private, max-age=31536000, immutable'))) {
-        throw new HttpError(404, 'Bild nicht gefunden');
-      }
-      return;
-    }
-
-    const file = path.join(PUBLIC_DIR, path.normalize(pathname).replace(/^(\.\.[/\\])+/, ''));
-    if (file.startsWith(PUBLIC_DIR + path.sep) && path.extname(file)) {
-      if (await serveFile(res, file, 'no-cache')) return;
-      throw new HttpError(404, 'Datei nicht gefunden');
-    }
-    // App routes (/, /share, …) all load the single-page app.
-    await serveFile(res, path.join(PUBLIC_DIR, 'index.html'), 'no-cache');
+  async function handleImage(request, pathname) {
+    if (request.method !== 'GET' && request.method !== 'HEAD') throw new HttpError(405, 'Methode nicht erlaubt');
+    if (!auth.isAuthorized(request.headers)) throw new HttpError(401, 'Bitte anmelden');
+    const name = pathname.slice('/images/'.length);
+    const image = /^[\w.-]+$/.test(name) ? await store.getImage(name) : null;
+    if (!image) throw new HttpError(404, 'Bild nicht gefunden');
+    return new Response(request.method === 'HEAD' ? null : image.data, {
+      headers: {
+        ...SECURITY_HEADERS,
+        'content-type': image.mediaType,
+        'cache-control': 'private, max-age=31536000, immutable',
+      },
+    });
   }
 
-  return async function handler(req, res) {
+  /**
+   * @param {Request} request
+   * @param {{ clientIp?: string, waitUntil?: Function }} ctx platform context
+   * @returns {Promise<Response>}
+   */
+  return async function handle(request, ctx = {}) {
     let pathname;
     try {
-      pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+      pathname = decodeURIComponent(new URL(request.url).pathname);
     } catch {
-      return send(res, 400, { error: 'Ungültige Adresse' });
+      return send(400, { error: 'Ungültige Adresse' });
     }
     try {
-      if (pathname === '/healthz') return send(res, 200, 'ok');
-      if (pathname.startsWith('/api/')) return await handleApi(req, res, pathname);
-      return await handleStatic(req, res, pathname);
+      if (pathname === '/healthz') return send(200, 'ok');
+      if (pathname.startsWith('/api/')) return await handleApi(request, pathname, ctx);
+      if (pathname.startsWith('/images/')) return await handleImage(request, pathname);
+      throw new HttpError(404, 'Unbekannte Adresse');
     } catch (error) {
       if (!(error instanceof HttpError)) log.error?.(error);
       const status = error instanceof HttpError ? error.status : 500;
-      if (!res.headersSent) send(res, status, { error: error instanceof HttpError ? error.message : 'Interner Fehler' });
-      else res.destroy();
+      return send(status, { error: error instanceof HttpError ? error.message : 'Interner Fehler' });
     }
   };
 }

@@ -1,5 +1,3 @@
-import { unlink } from 'node:fs/promises';
-import path from 'node:path';
 import { CATEGORY_IDS, categorize, extractHashtags, extractMinutes } from './categories.js';
 import { describeAiError } from './ai.js';
 import { downloadImage, fetchMetadata } from './fetcher.js';
@@ -20,16 +18,16 @@ export function placeholderTitle(platform) {
 
 const unique = (list) => [...new Set(list.filter(Boolean))];
 
-// Loads metadata for saved links in the background, one at a time, so that
-// sharing a link returns immediately.
-export function createEnricher({ db, imagesDir, ai = null, fetchOptions = {}, log = console }) {
-  const queue = [];
-  let running = false;
-  let idleWaiters = [];
-
-  async function analyze(id, { force }) {
-    const recipe = db.get(id);
+// Analyses a saved link: loads its preview, pulls out the recipe and sorts it
+// into categories. Runs after the link was saved, so sharing returns at once.
+// `timeLimitMs` keeps the whole run inside Cloudflare's background-work limit.
+export function createAnalyzer({ store, ai = null, fetchOptions = {}, log = console, timeLimitMs = null }) {
+  async function analyze(id, { force = false } = {}) {
+    const startedAt = Date.now();
+    const recipe = await store.get(id);
     if (!recipe) return;
+    // Bumps updated_at as well, which tells a stuck run from a running one.
+    await store.update(id, { attempts: recipe.attempts + 1 });
     const problems = [];
 
     let meta = null;
@@ -42,7 +40,7 @@ export function createEnricher({ db, imagesDir, ai = null, fetchOptions = {}, lo
     let image = null;
     if (meta?.imageUrl && (force || !recipe.thumbnail)) {
       try {
-        image = await downloadImage(meta.imageUrl, imagesDir, `r${id}-${Date.now().toString(36)}`, fetchOptions);
+        image = await downloadImage(meta.imageUrl, fetchOptions);
       } catch (error) {
         log.warn?.(`Vorschaubild für #${id} nicht geladen: ${error.message}`);
       }
@@ -63,7 +61,10 @@ export function createEnricher({ db, imagesDir, ai = null, fetchOptions = {}, lo
     auto.categories = categorize({ ...auto, caption });
 
     let usedAi = false;
-    if (ai && (caption || auto.title || image)) {
+    const aiTime = timeLimitMs ? timeLimitMs - (Date.now() - startedAt) : null;
+    if (ai && (caption || auto.title || image) && aiTime !== null && aiTime < 3000) {
+      problems.push('KI hat zu lange gebraucht – „Neu analysieren“ versuchen');
+    } else if (ai && (caption || auto.title || image)) {
       try {
         const result = await ai.analyze({
           platform: meta?.platform || recipe.platform,
@@ -74,7 +75,7 @@ export function createEnricher({ db, imagesDir, ai = null, fetchOptions = {}, lo
           ingredients: meta?.ingredients,
           steps: meta?.steps,
           image: image ? { mediaType: image.mediaType, data: image.data } : null,
-        });
+        }, { timeoutMs: aiTime });
         auto.title = result.title || auto.title;
         auto.categories = result.categories;
         if (result.ingredients.length) auto.ingredients = result.ingredients;
@@ -92,7 +93,7 @@ export function createEnricher({ db, imagesDir, ai = null, fetchOptions = {}, lo
 
     // The user may have edited the recipe while it was being analysed; only an
     // explicit "neu analysieren" overwrites their changes (custom categories stay).
-    const current = db.get(id);
+    const current = await store.get(id);
     if (!current) return;
     const keepTitle = !force && current.title && current.title !== placeholderTitle(current.platform);
     const update = {
@@ -111,27 +112,39 @@ export function createEnricher({ db, imagesDir, ai = null, fetchOptions = {}, lo
       statusDetail: problems.join(' · ') || null,
       analyzedWithAi: usedAi,
     };
-    if (meta && meta.url !== current.url && !db.findByUrl(meta.url)) update.url = meta.url;
+    if (meta && meta.url !== current.url && !(await store.findByUrl(meta.url))) update.url = meta.url;
 
     if (image) {
-      const oldFile = db.thumbnailFile(id);
-      update.thumbnail = image.file;
-      if (oldFile) await unlink(path.join(imagesDir, oldFile)).catch(() => {});
+      const name = `r${id}-${Date.now().toString(36)}.${image.ext}`;
+      await store.setThumbnail(id, { name, mediaType: image.mediaType, data: image.data });
     }
-    db.update(id, update);
+    await store.update(id, update);
   }
+
+  return {
+    async analyze(id, options) {
+      try {
+        await analyze(id, options);
+      } catch (error) {
+        log.error?.(`Analyse von #${id} abgebrochen:`, error);
+        await store.update(id, { status: 'failed', statusDetail: 'Unerwarteter Fehler bei der Analyse' }).catch(() => {});
+      }
+    },
+  };
+}
+
+// Runs analyses one after another in the background (Node server).
+export function createQueue(analyzer) {
+  const queue = [];
+  let running = false;
+  let idleWaiters = [];
 
   async function run() {
     if (running) return;
     running = true;
     while (queue.length) {
       const job = queue.shift();
-      try {
-        await analyze(job.id, job);
-      } catch (error) {
-        log.error?.(`Analyse von #${job.id} abgebrochen:`, error);
-        db.update(job.id, { status: 'failed', statusDetail: 'Unerwarteter Fehler bei der Analyse' });
-      }
+      await analyzer.analyze(job.id, job);
     }
     running = false;
     const waiters = idleWaiters;

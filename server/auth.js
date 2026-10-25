@@ -43,11 +43,12 @@ export function createAuth(password, serverSecret = randomBytes(32).toString('he
     enabled,
     apiToken,
 
-    isAuthorized(req) {
+    // `headers` is a Fetch API Headers object.
+    isAuthorized(headers) {
       if (!enabled) return true;
-      const header = req.headers.authorization || '';
+      const header = headers.get('authorization') || '';
       if (header.startsWith('Bearer ') && safeEqual(header.slice(7).trim(), apiToken)) return true;
-      return sessionValid(parseCookies(req.headers.cookie)[SESSION_COOKIE]);
+      return sessionValid(parseCookies(headers.get('cookie') || '')[SESSION_COOKIE]);
     },
 
     // Basic brute-force protection: 10 wrong passwords per IP per 15 minutes.

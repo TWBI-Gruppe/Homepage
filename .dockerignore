@@ -1,6 +1,9 @@
 node_modules
 data
 test
+worker
+wrangler.jsonc
+.wrangler
 .git
 .env
 *.md
