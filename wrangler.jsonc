@@ -6,6 +6,9 @@
   "main": "worker/index.js",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
+  // Keep variables set in the dashboard (APP_PASSWORD, ANTHROPIC_MODEL, …)
+  // when a new version is deployed; otherwise every deploy would delete them.
+  "keep_vars": true,
   "assets": {
     "directory": "public",
     "not_found_handling": "single-page-application",

@@ -69,11 +69,13 @@ async function api(path, { method = 'GET', body } = {}) {
     options.body = JSON.stringify(body ?? {});
   }
   const res = await fetch(path, options);
+  const text = await res.text();
   let data = null;
   try {
-    data = await res.json();
+    data = JSON.parse(text);
   } catch {
-    // empty or non-JSON body
+    // Plain-text answers (e.g. a setup hint from the server) become the message.
+    if (!res.ok && text && text.length < 300 && !text.trim().startsWith('<')) data = { error: text.trim() };
   }
   if (res.status === 401 && path !== '/api/login') {
     showLogin();
