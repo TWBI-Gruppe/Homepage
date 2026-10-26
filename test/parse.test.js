@@ -119,7 +119,91 @@ Für die Sauce:
 
 test('parseRecipeFromCaption handles inline lists and captions without recipe', () => {
   assert.deepEqual(parseRecipeFromCaption('Zutaten: 2 Eier, 100 g Mehl, Prise Salz').ingredients, ['2 Eier', '100 g Mehl', 'Prise Salz']);
-  assert.deepEqual(parseRecipeFromCaption('So lecker!! Rezept im Video 😍 #food'), { ingredients: [], steps: [] });
+  assert.deepEqual(parseRecipeFromCaption('So lecker!! Rezept im Video 😍 #food'), {
+    ingredients: [],
+    steps: [],
+    prepMinutes: null,
+    servings: null,
+  });
+});
+
+test('parseRecipeFromCaption separates notes, instructions, nutrition and outro in bulleted lists', () => {
+  const caption = `Anzeige | Schnelle Pizzabrötchen
+
+✅ ideal für Kinder
+
+Zutaten für 6 Stück: ⬇️
+•6 Aufbackbrötchen
+•~ 50 ml Pizzasauce @saucenshop.de* oder nach Wahl
+•200 g Hackfleisch
+( anbraten und würzen )
+•100 g Mozzarella ( 15g pro Stück) gerieben
+
+Zum Bestreichen:
+•1 Ei
+
+(Ei verquirlen und die Brötchen damit bestreichen – optional mit Oregano bestreuen)
+
+Ofen vorheizen:
+180° Umluft – Backzeit : ca 10 min .
+
+Nach dem Backen:
+•Basilikum, gehackt
+
+Nährwerte pro Stück: ⬇️
+250 Kcal | 20g KH | 15g E
+
+Folge mir für mehr Rezepte ✌️`;
+  const recipe = parseRecipeFromCaption(caption);
+  assert.deepEqual(recipe.ingredients, [
+    '6 Aufbackbrötchen',
+    '~ 50 ml Pizzasauce oder nach Wahl',
+    '200 g Hackfleisch (anbraten und würzen)',
+    '100 g Mozzarella (15g pro Stück) gerieben',
+    'Zum Bestreichen:',
+    '1 Ei',
+    'Nach dem Backen:',
+    'Basilikum, gehackt',
+  ]);
+  assert.deepEqual(recipe.steps, [
+    'Ei verquirlen und die Brötchen damit bestreichen – optional mit Oregano bestreuen',
+    'Ofen vorheizen: 180° Umluft – Backzeit: ca 10 min.',
+  ]);
+  assert.equal(recipe.servings, '6 Stück');
+});
+
+test('parseRecipeFromCaption reads stated times and servings instead of listing them as steps', () => {
+  const caption = `Garlic Butter Shrimp
+
+Ingredients
+1 lb shrimp
+2 tbsp butter
+Instructions
+Melt the butter.
+Cook the shrimp for 3 minutes.
+
+Prep Time: 10 minutes
+Cook Time: 1 hour 5 minutes
+Servings: 4
+
+#shrimp #dinner`;
+  const recipe = parseRecipeFromCaption(caption);
+  assert.deepEqual(recipe.ingredients, ['1 lb shrimp', '2 tbsp butter']);
+  assert.deepEqual(recipe.steps, ['Melt the butter.', 'Cook the shrimp for 3 minutes.']);
+  assert.equal(recipe.prepMinutes, 75);
+  assert.equal(recipe.servings, '4');
+});
+
+test('parseRecipeFromCaption strips keycap step numbers', () => {
+  const { steps } = parseRecipeFromCaption('Zubereitung:\n1️⃣ Teig ausrollen.\n2️⃣ Belegen und backen.');
+  assert.deepEqual(steps, ['Teig ausrollen.', 'Belegen und backen.']);
+});
+
+test('titleFromCaption drops ad labels and calms all-caps titles', () => {
+  assert.equal(titleFromCaption('Anzeige | Schnelle Pizzabrötchen\n…'), 'Schnelle Pizzabrötchen');
+  assert.equal(titleFromCaption('*Werbung* - Ofengemüse'), 'Ofengemüse');
+  assert.equal(titleFromCaption('CHEESEBURGER CAKE - JUICY AND CHEESY\n🍔'), 'Cheeseburger Cake - Juicy And Cheesy');
+  assert.equal(titleFromCaption('Mein BBQ-Rezept'), 'Mein BBQ-Rezept');
 });
 
 test('captionIntro stops at the first ingredient or step heading', () => {

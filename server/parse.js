@@ -202,10 +202,26 @@ export function parseJsonLdRecipe(html = '') {
 
 const INGREDIENT_HEADINGS = /^(zutaten|ingredients?|du brauchst|ihr braucht|you(?:'ll)? need|einkaufsliste|was du brauchst)\b/i;
 const STEP_HEADINGS = /^(zubereitung|anleitung|so geht'?s|so wird'?s gemacht|instructions?|method|directions|steps|preparation|how to make( it)?|schritte)\b/i;
-const BULLET = /^\s*(?:[-–—•·*▪︎▫️●○◦✔✅☑️➡️👉🔸🔹⭐️]+|\d{1,2}[.)]|\p{Extended_Pictographic}️?)\s*/u;
+// Bullets, "1." / "1)" numbering, keycap digits like 1️⃣ and leading emoji.
+const BULLET = /^\s*(?:[-–—•·*▪︎▫️●○◦✔✅☑️➡️👉🔸🔹⭐️]+|\d{1,2}[.)]|\d️?⃣|\p{Extended_Pictographic}️?)\s*/u;
+// "Prep Time: 15 minutes", "Portionen: 4" and similar fact lines.
+const TIME_LINE = /^(total time|gesamtzeit|prep(?:aration)? time|zubereitungszeit|arbeitszeit|vorbereitung(?:szeit)?|cook(?:ing)? time|kochzeit|backzeit|garzeit)\s*:\s*(.+)$/i;
+const SERVINGS_LINE = /^(servings|serves|portionen|portion|yield|ergibt|menge)\s*:\s*(.+)$/i;
+// Nutrition facts and the usual "follow me / ad" outro are not part of the recipe.
+const NUTRITION_LINE = /^(nährwerte?|naehrwerte?|nährwertangaben|makros|macros|nutrition(?: facts)?|kalorien|calories)\b|\b\d+\s*kcal\b/i;
+const OUTRO_LINE = /^(folge|folgt|follow|link in|mehr rezepte|more recipes|speicher|save (?:this|for)|teile|share|werbung|anzeige|rabatt|code\b|tag (?:a|someone)|markiere|kommentier|comment)/i;
+// Lines in an ingredient list that are really instructions.
+const INSTRUCTION_WORDS = /\b(vorheizen|preheat|backen|bake|braten|anbraten|kochen|köcheln|rühren|verrühren|mischen|vermischen|vermengen|geben|schneiden|würzen|servieren|serve|mix|stir|cook|fry|heat)\b/i;
 
 function cleanLine(line) {
-  return line.replace(BULLET, '').replace(/\s+/g, ' ').trim();
+  return line
+    .replace(BULLET, '')
+    .replace(/@[\w.]+\*?/g, '')
+    .replace(/\(\s+/g, '(')
+    .replace(/\s+\)/g, ')')
+    .replace(/\s+([.,;:!?])(?=\s|$)/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 // "Zutaten:" may be followed by items on the same line; a heading without a
@@ -215,10 +231,24 @@ function sectionHeading(line) {
   const colon = plain.indexOf(':');
   const head = colon >= 0 ? plain.slice(0, colon).trim() : plain;
   if (head.length > 40 || (colon < 0 && plain.length > 40)) return null;
-  const rest = colon >= 0 ? plain.slice(colon + 1).trim() : '';
-  if (INGREDIENT_HEADINGS.test(head)) return { section: 'ingredients', rest };
-  if (STEP_HEADINGS.test(head)) return { section: 'steps', rest };
+  const rest = colon >= 0 ? plain.slice(colon + 1).replace(/[^\p{L}\p{N}]+$/u, '').trim() : '';
+  if (INGREDIENT_HEADINGS.test(head)) return { section: 'ingredients', head, rest };
+  if (STEP_HEADINGS.test(head)) return { section: 'steps', head, rest };
   return null;
+}
+
+// "15 minutes", "1 Std. 20 Min.", "1 hour" → minutes
+function durationToMinutes(text) {
+  const hours = Number(text.match(/(\d+(?:[.,]\d+)?)\s*(?:h\b|std|stunde|hour|hr)/i)?.[1]?.replace(',', '.') ?? 0);
+  const minutes = Number(text.match(/(\d+)\s*(?:min|minute)/i)?.[1] ?? 0);
+  const total = Math.round(hours * 60 + minutes);
+  return total > 0 ? total : null;
+}
+
+// "Zutaten für 8 Stück" / "Zutaten (2 Portionen)" → "8 Stück" / "2 Portionen"
+function servingsFromHeading(head) {
+  const m = head.match(/\((\d+[^)]*)\)/) || head.match(/\b(?:für|for)\s+(\d+(?:\s+[\p{L}]+)?)/iu);
+  return m ? m[1].trim() : null;
 }
 
 // The part of a caption before its ingredient list or instructions – what the
@@ -233,25 +263,42 @@ export function captionIntro(caption = '') {
 }
 
 // Many TikTok/Instagram captions contain the whole recipe in a loose
-// "Zutaten: … Zubereitung: …" layout. This picks it up without AI.
+// "Zutaten: … Zubereitung: …" layout. This picks it up without AI, along with
+// stated times and servings, and leaves out nutrition facts and outros.
 export function parseRecipeFromCaption(caption = '') {
   const lines = caption.replace(/\r/g, '').split('\n');
   const ingredients = [];
   const steps = [];
+  const times = {};
+  let servings = null;
   let section = null;
+  // Whether the current ingredient list marks its items with bullets; then
+  // unmarked lines in between are notes or instructions, not ingredients.
+  let bulleted = null;
 
-  for (const raw of lines) {
+  const addStep = (text) => {
+    const previous = steps.at(-1);
+    // "Backofen vorheizen:" followed by the details belongs together.
+    if (previous?.endsWith(':')) steps[steps.length - 1] = `${previous} ${text}`;
+    else steps.push(text);
+  };
+
+  const isBulletLine = (line) => BULLET.test(line) && !/^\d{1,2}[.)]/.test(line);
+  const nextLine = (i) => lines.slice(i + 1).find((l) => l.trim())?.trim() ?? '';
+
+  for (const [i, raw] of lines.entries()) {
     const line = raw.trim();
     if (!line) continue;
     const heading = sectionHeading(line);
-    if (heading?.section === 'ingredients') {
-      section = 'ingredients';
-      if (heading.rest) ingredients.push(...heading.rest.split(/,\s*/).map(cleanLine).filter(Boolean));
-      continue;
-    }
-    if (heading?.section === 'steps') {
-      section = 'steps';
-      if (heading.rest) steps.push(cleanLine(heading.rest));
+    if (heading) {
+      section = heading.section;
+      bulleted = null;
+      if (section === 'ingredients') {
+        servings ||= servingsFromHeading(heading.head);
+        if (heading.rest) ingredients.push(...heading.rest.split(/,\s*/).map(cleanLine).filter(Boolean));
+      } else if (heading.rest) {
+        addStep(cleanLine(heading.rest));
+      }
       continue;
     }
     // A block of hashtags ends the recipe part of a caption.
@@ -259,24 +306,75 @@ export function parseRecipeFromCaption(caption = '') {
       section = null;
       continue;
     }
-    // Hashtags at the end of a line mark the end of the recipe text.
+
     const cleaned = cleanLine(line).replace(/(?:\s*#[\p{L}\p{N}_]+)+$/u, '').trim();
-    const endsWithTags = cleaned.length < cleanLine(line).length;
-    if (cleaned && section === 'ingredients') ingredients.push(cleaned);
-    else if (cleaned && section === 'steps') steps.push(cleaned);
+    const endsWithTags = /#[\p{L}\p{N}_]+\s*$/u.test(line);
+    const plain = cleaned.replace(/^[^\p{L}\p{N}(]+/u, '');
+
+    const time = plain.match(TIME_LINE);
+    const serving = plain.match(SERVINGS_LINE);
+    if (time || serving) {
+      if (time) times[/total|gesamt/i.test(time[1]) ? 'total' : /cook|koch|back|gar/i.test(time[1]) ? 'cook' : 'prep'] = durationToMinutes(time[2]);
+      if (serving) servings ||= serving[2].trim();
+    } else if (OUTRO_LINE.test(plain)) {
+      section = null;
+    } else if (NUTRITION_LINE.test(plain)) {
+      // skip the nutrition table, but keep reading: a recipe may follow
+    } else if (cleaned && section === 'ingredients') {
+      const isBullet = isBulletLine(line);
+      const parenthetical = /^\(.*\)$/.test(cleaned);
+      const subheading = cleaned.endsWith(':') && cleaned.length <= 40;
+      if (!subheading && !parenthetical) bulleted ??= isBullet;
+      if (parenthetical && cleaned.length <= 40 && ingredients.length && !ingredients.at(-1).endsWith(':')) {
+        ingredients[ingredients.length - 1] += ` ${cleaned}`;
+      } else if (parenthetical) {
+        addStep(cleaned.slice(1, -1).trim());
+      } else if (subheading && !(bulleted && isBulletLine(nextLine(i))) && INSTRUCTION_WORDS.test(cleaned)) {
+        // "Backofen vorheizen:" is an instruction; "Nach dem Backen:" followed
+        // by more bullet points is a group of ingredients.
+        addStep(cleaned);
+      } else if (subheading) {
+        // A new group ("Für die Sauce:") may use its own list style.
+        ingredients.push(cleaned);
+        bulleted = null;
+      } else if (isBullet || !bulleted) {
+        ingredients.push(cleaned);
+      } else {
+        addStep(cleaned);
+      }
+    } else if (cleaned && section === 'steps') {
+      addStep(cleaned);
+    }
     if (endsWithTags) section = null;
   }
 
+  const prepMinutes = times.total ?? (times.prep || times.cook ? (times.prep ?? 0) + (times.cook ?? 0) : null);
   return {
-    ingredients: ingredients.filter((l) => l.length <= 200).slice(0, 60),
+    // A trailing sub-heading without items ("Zum Servieren:") is noise.
+    ingredients: ingredients.filter((l, i, all) => l.length <= 200 && !(l.endsWith(':') && i === all.length - 1)).slice(0, 60),
     steps: steps.filter((l) => l.length <= 1000).slice(0, 40),
+    prepMinutes,
+    servings,
   };
 }
 
-// First sensible line of a caption, without hashtags, as a fallback title.
+const AD_PREFIX = /^\s*(?:[*[(]?\s*(?:anzeige|werbung|ad|sponsored|unbezahlte werbung)\s*[*\])]?\s*[|:–—-]\s*)+/i;
+
+// SHOUTING TITLES → Shouting Titles
+function calmCaps(text) {
+  const letters = text.replace(/[^\p{L}]/gu, '');
+  const upper = letters.replace(/[^\p{Lu}]/gu, '');
+  if (letters.length < 6 || upper.length / letters.length < 0.8) return text;
+  return text.toLowerCase().replace(/(^|[\s\-–—/(&+])(\p{L})/gu, (_, sep, ch) => sep + ch.toUpperCase());
+}
+
+// First sensible line of a caption, without hashtags and ad labels, as a
+// fallback title.
 export function titleFromCaption(caption = '') {
   for (const raw of caption.split('\n')) {
-    const line = raw.replace(/#[\p{L}\p{N}_]+/gu, '').replace(/@[\w.]+/g, '').replace(/\s+/g, ' ').trim();
+    const line = calmCaps(
+      raw.replace(/#[\p{L}\p{N}_]+/gu, '').replace(/@[\w.]+/g, '').replace(AD_PREFIX, '').replace(/\s+/g, ' ').trim(),
+    );
     if (line.replace(/[^\p{L}]/gu, '').length >= 3) {
       return line.length > 90 ? `${line.slice(0, 87).trimEnd()}…` : line;
     }

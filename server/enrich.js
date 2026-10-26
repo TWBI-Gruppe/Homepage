@@ -54,8 +54,8 @@ export function createAnalyzer({ store, ai = null, fetchOptions = {}, log = cons
       author: meta?.author || recipe.author,
       ingredients: meta?.ingredients?.length ? meta.ingredients : fromCaption.ingredients,
       steps: meta?.steps?.length ? meta.steps : fromCaption.steps,
-      prepMinutes: meta?.prepMinutes ?? extractMinutes(caption),
-      servings: meta?.servings ?? null,
+      prepMinutes: meta?.prepMinutes ?? fromCaption.prepMinutes ?? extractMinutes(caption),
+      servings: meta?.servings ?? fromCaption.servings,
       tags: unique([...extractHashtags(caption), ...(meta?.keywords ?? []).map((k) => k.toLowerCase())]).slice(0, 15),
     };
     auto.categories = categorize({ ...auto, caption });

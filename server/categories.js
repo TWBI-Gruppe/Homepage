@@ -94,7 +94,10 @@ export const CATEGORIES = [
     id: 'saucen',
     label: 'Saucen & Dips',
     emoji: '🫙',
+    // Only when the dish itself is a sauce: "Steak mit Kräutersauce" is not.
+    scope: 'title',
     match: /\bsauce|soße|sosse|\bdip\b|dips\b|dressing|pesto|hummus|aioli|guacamole|marinade|salsa|tzatziki|chutney/,
+    exclude: /\b(mit|with|in|an|auf|und|and|&|plus|dazu)\b.*(sauce|soße|sosse|\bdips?\b|dressing|pesto|aioli|salsa|tzatziki|chutney)/,
   },
   {
     id: 'asiatisch',
@@ -173,16 +176,22 @@ export function extractMinutes(text = '') {
 // Keyword-based fallback used when no AI key is configured (or the AI call fails).
 export function categorize({ title = '', caption = '', tags = [], ingredients = [], prepMinutes = null } = {}) {
   const hashtags = tags.map((t) => `#${t}`).join(' ');
+  const titleText = [title, hashtags].join('\n').toLowerCase();
   const intro = [title, captionIntro(caption), hashtags].join('\n').toLowerCase();
   const all = [title, caption, hashtags, ingredients.join('\n')].join('\n').toLowerCase();
-  const found = CATEGORIES.filter((c) => c.match.test(c.scope === 'all' ? all : intro)).map((c) => c.id);
+  const text = { title: titleText, all, intro };
+  const found = CATEGORIES.filter(
+    (c) => c.match.test(text[c.scope || 'intro']) && !c.exclude?.test(title.toLowerCase()),
+  ).map((c) => c.id);
 
   const minutes = prepMinutes ?? extractMinutes(intro);
   if (minutes && minutes <= 20 && !found.includes('schnell')) found.push('schnell');
 
   // "Veggie-Burger" or "vegane Bolognese" should not land in the meat category.
+// Checked the other way round, a "Cheeseburger Cake" is no dessert.
   if (found.includes('vegan') || found.includes('vegetarisch')) {
     return found.filter((id) => !MEAT_IDS.includes(id));
   }
+  if (found.some((id) => MEAT_IDS.includes(id))) return found.filter((id) => id !== 'dessert');
   return found;
 }

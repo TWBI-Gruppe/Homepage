@@ -40,6 +40,15 @@ test('dish types come from the title and intro, not from single ingredients', ()
   assert.ok(!cats.includes('saucen') && !cats.includes('asiatisch'), cats.join());
 });
 
+test('savoury "cakes" are no desserts, and a dish with a sauce is no sauce', () => {
+  const cake = categorize({ title: 'Cheeseburger Cake', tags: ['kuchen', 'burger'], ingredients: ['200 g Rinderhackfleisch'] });
+  assert.ok(cake.includes('fleisch') && !cake.includes('dessert'), cake.join());
+  const steak = categorize({ title: 'Garlic Butter Steak with Herb Sauce', caption: 'A rich creamy sauce on top.' });
+  assert.ok(steak.includes('fleisch') && !steak.includes('saucen'), steak.join());
+  assert.ok(categorize({ title: 'Knoblauch-Dip in 5 Minuten' }).includes('saucen'));
+  assert.ok(!categorize({ title: 'Nudeln mit Tomatensoße' }).includes('saucen'));
+});
+
 test('categorize marks quick recipes by prep time', () => {
   assert.ok(categorize({ title: 'Omelett', prepMinutes: 10 }).includes('schnell'));
   assert.ok(!categorize({ title: 'Schmorbraten', prepMinutes: 180 }).includes('schnell'));
